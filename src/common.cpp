@@ -16,6 +16,14 @@ data_t CreateData(const string& data)
     return ret;
 }
 
+data_t CreateData(void* data, size_t size)
+{
+    data_t ret = CreateData();
+    ret->resize(size);
+    memcpy(ret->data(), data, size);
+    return ret;
+}
+
 data_t Concat(data_t a, data_t b)
 {
     data_t ret = CreateData();

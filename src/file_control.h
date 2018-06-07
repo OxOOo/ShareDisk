@@ -5,12 +5,13 @@
 #include <string>
 #include <vector>
 #include <stdint.h>
+#include <thread>
 
 #include "common.h"
+#include "networking.h"
+#include "protocol.h"
 
 using namespace std;
-
-#define FILENAME_MAX_SIZE 512
 
 struct KeyEntry
 {
@@ -32,6 +33,7 @@ class FileControl
 {
 public:
     FileControl(string pd_path, vector<string> keystrings);
+    ~FileControl();
 
     void Init();
 
@@ -54,11 +56,16 @@ private:
     void LoadCFG();
     void SaveCFG();
 
+    void StartThread();
+    void BroadcastFile(const char* path);
+
 private:
     string pd_path;
     string cfg_filename;
     vector<File> files;
     vector<KeyEntry> keys;
+    Networking* net;
+    thread t;
 };
 
 #endif // _FILE_CONTROL_H_

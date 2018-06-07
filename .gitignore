@@ -1,7 +1,9 @@
 build
 main
 real
+real2
 mount
+mount2
 log.txt
 
 # Prerequisites

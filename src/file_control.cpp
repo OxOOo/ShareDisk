@@ -9,6 +9,8 @@
 
 using namespace std;
 
+#define ASSERT(expr) { if (!(expr)) { LOG_ERROR << #expr; exit(1); } }
+
 FileControl::FileControl(string pd_path, vector<string> keystrings)
 {
     this->pd_path = pd_path;
@@ -22,7 +24,7 @@ FileControl::FileControl(string pd_path, vector<string> keystrings)
             if (keystrings[i][k] == ':')
                 pos = k;
         LOG_INFO << keystrings[i] << " " << pos;
-        assert(pos >= 0);
+        ASSERT(pos >= 0);
         
         entry.name = keystrings[i].substr(0, pos);
         entry.keystring = keystrings[i].substr(pos+1);
@@ -33,7 +35,16 @@ FileControl::FileControl(string pd_path, vector<string> keystrings)
         keys.push_back(entry);
     }
 
-    LoadCFG();
+    vector<SecretKey> secrets;
+    for(int i = 0; i < (int)keys.size(); i ++) {
+        secrets.push_back(keys[i].key);
+    }
+    net = new Networking(secrets);
+}
+
+FileControl::~FileControl()
+{
+    delete net;
 }
 
 void FileControl::Init()
@@ -61,6 +72,11 @@ void FileControl::Init()
         if (dirs.find(keys[i].name) == dirs.end()) {
             mkdir(Resolve(keys[i].name).c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
         }
+    
+    LoadCFG();
+    
+    net->Listen();
+    StartThread();
 }
 
 string FileControl::Resolve(const string& path) const
@@ -115,10 +131,11 @@ int FileControl::NewFile(const char *path, int flags, mode_t mode)
     LOG_INFO << "NewFile: " << path;
 
     File* x = FindFile(path);
-    assert(x == NULL || x->is_deleted);
+    ASSERT(x == NULL || x->is_deleted);
 
 	int res = open(Resolve(path).c_str(), flags, mode);
     if (res == -1) return res;
+    fsync(res);
 
     if (x == NULL) {
         File file;
@@ -127,10 +144,12 @@ int FileControl::NewFile(const char *path, int flags, mode_t mode)
         x = &files[files.size()-1];
     }
     x->timestamp = time(NULL);
-    x->is_deleted = true;
+    x->is_deleted = false;
     x->extra_length = 0;
 
     SaveCFG();
+    BroadcastFile(path);
+
     return res;
 }
 
@@ -138,7 +157,7 @@ int FileControl::ReadFile(const char *path, int fd, char *buf, size_t size, off_
 {
     LOG_INFO << "ReadFile: " << path;
     File *x = FindFile(path);
-    assert(x != NULL);
+    ASSERT(x != NULL);
 
     int key_index = -1;
     for(int i = 0; i < (int)keys.size(); i ++)
@@ -148,13 +167,14 @@ int FileControl::ReadFile(const char *path, int fd, char *buf, size_t size, off_
         }
     LOG_INFO << "FirstPath(path) = " << FirstPath(path);
     LOG_INFO << "key_index = " << key_index;
-    assert(key_index >= 0);
+    ASSERT(key_index >= 0);
 
     data_t file_data = CreateData();
     data_t decoded_data = CreateData();
     size_t file_size = FileSize(Resolve(path));
     file_data->resize(file_size+x->extra_length);
     decoded_data->resize(file_size+x->extra_length);
+    ASSERT(file_data->size()%16 == 0);
 
     LOG_INFO << "ReadFile[0]";
 
@@ -170,17 +190,21 @@ int FileControl::ReadFile(const char *path, int fd, char *buf, size_t size, off_
     LOG_INFO << "ReadFile[2]";
     aes_decode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), file_data->data(), file_data->size(), decoded_data->data());
     LOG_INFO << "ReadFile[3]";
+
+    offset = min((size_t)offset, file_size);
+    size = min(size, file_size-offset);
     memcpy(buf, decoded_data->data()+offset, size);
+    
     LOG_INFO << "ReadFile[4]";
 
-    return res;
+    return size;
 }
 
 int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t size, off_t offset)
 {
     LOG_INFO << "WriteFile: " << path;
     File* x = FindFile(path);
-    assert(x != NULL);
+    ASSERT(x != NULL);
 
     int key_index = -1;
     for(int i = 0; i < (int)keys.size(); i ++)
@@ -190,13 +214,14 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
         }
     LOG_INFO << "FirstPath(path) = " << FirstPath(path);
     LOG_INFO << "key_index = " << key_index;
-    assert(key_index >= 0);
+    ASSERT(key_index >= 0);
 
     data_t file_data = CreateData();
     data_t decoded_data = CreateData();
     size_t file_size = FileSize(Resolve(path));
     file_data->resize(file_size+x->extra_length);
     decoded_data->resize(file_size+x->extra_length);
+    ASSERT(file_data->size()%16 == 0);
 
     LOG_INFO << "WriteFile[0] " << file_data->size() << " " << file_size << " " << x->extra_length;
     LOG_INFO << offset << " " << size;
@@ -237,7 +262,9 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
         LOG_ERROR << "pwrite : " << res << " " << strerror(errno);
         return res;
     }
+    fsync(fd);
     LOG_INFO << "WriteFile[9]";
+    x->is_deleted = false;
     x->timestamp = time(NULL);
     x->extra_length = extra_length;
     memcpy(x->extra_data, file_data->data()+max(file_size, size+offset), extra_length);
@@ -245,14 +272,16 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
     LOG_INFO << max(file_size, size+offset) << " " << max(file_size, size+offset)/1024;
 
     SaveCFG();
-    return res;
+    BroadcastFile(path);
+
+    return size;
 }
 
 int FileControl::DeleteFile(const char *path)
 {
     LOG_INFO << "DeleteFile: " << path;
     File* x = FindFile(path);
-    assert(x != NULL);
+    ASSERT(x != NULL);
 
     int res = unlink(Resolve(path).c_str());
     if (res == -1) {
@@ -264,6 +293,8 @@ int FileControl::DeleteFile(const char *path)
     x->is_deleted = true;
 
     SaveCFG();
+    BroadcastFile(path);
+
     return res;
 }
 
@@ -273,7 +304,7 @@ int FileControl::RenameFile(const char *from, const char *to)
 
     File* x = FindFile(from);
     if (x == NULL) return -EACCES;
-    if (FindFile(to) != NULL) return -EACCES;
+    // if (FindFile(to) != NULL) return -EACCES;
 
     int res = rename(Resolve(from).c_str(), Resolve(to).c_str());
     if (res == -1) {
@@ -281,9 +312,25 @@ int FileControl::RenameFile(const char *from, const char *to)
         return res;
     }
 
-    strncpy(x->filename, to, FILENAME_MAX_SIZE);
+    x->timestamp = time(NULL);
+    x->is_deleted = true;
+    
+    File* y = FindFile(to);
+    if (y == NULL) {
+        File file;
+        strncpy(file.filename, to, FILENAME_MAX_SIZE);
+        files.push_back(file);
+        y = &files[files.size()-1];
+    }
+    y->timestamp = time(NULL);
+    y->is_deleted = false;
+    y->extra_length = x->extra_length;
+    memcpy(y->extra_data, x->extra_data, 16);
 
     SaveCFG();
+    BroadcastFile(from);
+    BroadcastFile(to);
+
     return res;
 }
 
@@ -334,4 +381,142 @@ void FileControl::SaveCFG()
     }
 
     fclose(fd);
+}
+
+void debug(data_t data, int pos = 0)
+{
+    for(int i = pos; i < (int)data->size(); i ++) {
+        LOG_INFO << (int32_t)data->at(i);
+    }
+}
+
+void FileControl::StartThread()
+{
+    t = thread([this]() {
+        { // online
+            PacketHead head;
+            head.type = packet_type_online;
+            head.time = time(NULL);
+            for(int i = 0; i < (int)keys.size(); i ++) {
+                memset(head.filename, '\0', FILENAME_MAX_SIZE);
+                strncpy(head.filename, keys[i].name.c_str(), FILENAME_MAX_SIZE);
+                net->Broadcast(keys[i].key, CreateData(&head, sizeof(head)));
+            }
+        }
+        while(true)
+        {
+            data_t data = net->Recv();
+            if (data->size() < sizeof(PacketHead)) {
+                LOG_ERROR << "packet size too small";
+                continue;
+            }
+            PacketHead head = *(PacketHead*)data->data();
+            head.filename[FILENAME_MAX_SIZE-1] = '\0';
+            if (head.type == packet_type_online) {
+                LOG_INFO << "packet_type_online";
+                for(int i = 0; i < (int)files.size(); i ++) {
+                    if (FirstPath(files[i].filename) == head.filename) {
+                        BroadcastFile(files[i].filename);
+                    }
+                }
+            } else if (head.type == packet_type_modify) {
+                LOG_INFO << "packet_type_modify " << head.filename;
+                File* x = FindFile(head.filename);
+                if (x != NULL && x->timestamp > head.time) continue;
+                if (x == NULL) {
+                    File file;
+                    memcpy(file.filename, head.filename, FILENAME_MAX_SIZE);
+                    files.push_back(file);
+                    x = &files[files.size()-1];
+                }
+
+                ModifyPacket modify = *(ModifyPacket*)(data->data()+sizeof(PacketHead));
+                if (data->size() != sizeof(PacketHead)+sizeof(ModifyPacket)+modify.payload_size) {
+                    LOG_ERROR << "modify packet size unmatch";
+                    continue;
+                }
+
+                int fd = open(Resolve(x->filename).c_str(), O_RDWR|O_CREAT, 0666);
+                if (modify.payload_offset <= modify.file_size) {
+                    int64_t in_file_size = min(modify.file_size, modify.payload_offset+modify.payload_size)-modify.payload_offset;
+                    pwrite(fd, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), in_file_size, modify.payload_offset);
+                    memcpy(x->extra_data, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket)+in_file_size, modify.payload_size-in_file_size);
+                } else {
+                    int64_t extra_offset = modify.payload_offset - modify.file_size;
+                    memcpy(x->extra_data+extra_offset, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), modify.payload_size);
+                }
+                close(fd);
+                
+                x->extra_length = modify.total_size - modify.file_size;
+                x->timestamp = head.time;
+                x->is_deleted = false;
+                SaveCFG();
+            } else if (head.type == packet_type_delete) {
+                LOG_INFO << "packet_type_delete " << head.filename;
+                File* x = FindFile(head.filename);
+                if (x == NULL || x->timestamp > head.time) continue;
+                if (x->is_deleted == false) {
+                    unlink(Resolve(x->filename).c_str());
+                }
+                x->timestamp = head.time;
+                x->is_deleted = true;
+                SaveCFG();
+            } else {
+                LOG_ERROR << "unknow packet type";
+            }
+        }
+    });
+}
+
+void FileControl::BroadcastFile(const char* path)
+{
+    File* x = FindFile(path);
+    ASSERT(x != NULL);
+
+    int key_index = -1;
+    for(int i = 0; i < (int)keys.size(); i ++)
+        if (FirstPath(path) == keys[i].name) {
+            key_index = i;
+        }
+    ASSERT(key_index >= 0);
+
+    if (x->is_deleted) {
+        LOG_INFO << "send delete " << x->filename;
+        PacketHead head;
+        head.type = packet_type_delete;
+        head.time = x->timestamp;
+        memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
+        net->Broadcast(keys[key_index].key, CreateData(&head, sizeof(head)));
+    } else {
+        LOG_INFO << "send modify " << x->filename;
+        data_t file_data = CreateData();
+        size_t file_size = FileSize(Resolve(x->filename));
+        file_data->resize(file_size + x->extra_length);
+        int fd = open(Resolve(x->filename).c_str(), O_RDONLY);
+        pread(fd, file_data->data(), file_size, 0);
+        close(fd);
+        memcpy(file_data->data()+file_size, x->extra_data, x->extra_length);
+
+        for(size_t pos = 0; pos == 0 || pos < file_data->size(); pos += CHUNK_MAX_SIZE) {
+            size_t size = min((size_t)CHUNK_MAX_SIZE, file_data->size() - pos);
+
+            PacketHead head;
+            head.type = packet_type_modify;
+            head.time = x->timestamp;
+            memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
+            ModifyPacket modify;
+            modify.file_size = file_size;
+            modify.total_size = file_data->size();
+            modify.payload_offset = pos;
+            modify.payload_size = size;
+
+            data_t data = CreateData();
+            data->resize(sizeof(head)+sizeof(modify)+size);
+            memcpy(data->data(), &head, sizeof(head));
+            memcpy(data->data()+sizeof(head), &modify, sizeof(modify));
+            memcpy(data->data()+sizeof(head)+sizeof(modify), file_data->data()+pos, size);
+
+            net->Broadcast(keys[key_index].key, data);
+        }
+    }
 }

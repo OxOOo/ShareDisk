@@ -13,3 +13,7 @@ main: $(CXX_SOURCES) $(CXX_HEADERS)
 run: main
 	rm -rf $(PWD)/real/*
 	LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu ./main $(PWD)/mount $(PWD)/real name1:key1
+
+run2: main
+	rm -rf $(PWD)/real2/*
+	LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu ./main $(PWD)/mount2 $(PWD)/real2 name1:key1
