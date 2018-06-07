@@ -1,4 +1,8 @@
 build
+main
+real
+mount
+log.txt
 
 # Prerequisites
 *.d
