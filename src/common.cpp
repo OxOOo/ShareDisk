@@ -24,6 +24,11 @@ data_t CreateData(void* data, size_t size)
     return ret;
 }
 
+data_t Clone(data_t data)
+{
+    return CreateData(data->data(), data->size());
+}
+
 data_t Concat(data_t a, data_t b)
 {
     data_t ret = CreateData();

@@ -45,8 +45,11 @@ public:
     vector<string> KeyNames() const;
 
     File* FindFile(const char *path);
-    void Sync(const char *path, bool force = false); // 如果有更新，将缓存同步到磁盘上
-    void SyncDir(const char *path, bool force = false); // 如果有更新，将缓存同步到磁盘上
+
+    void Sync(const char *path); // 如果有更新，将缓存同步到磁盘上
+    void SyncDir(const char *path); // 如果有更新，将缓存同步到磁盘上
+    void ClearCache(const char *path); // 删除缓存
+
     int NewFile(const char *path, int flags, mode_t mode);
     int ReadFile(const char *path, int fd, char *buf, size_t size, off_t offset);
     int WriteFile(const char *path, int fd, const char *buf, size_t size, off_t offset);
@@ -60,8 +63,7 @@ private:
     void LoadCFG();
     void SaveCFG();
 
-    data_t Touch(const char *path);
-    void MarkDirty(const char *path);
+    data_t Touch(const char *path, bool readonly = true);
 
     data_t LoadFile(const char* path); // 从磁盘上载入并解码，不管理缓存
     int SaveFile(const char* path, int fd, data_t decoded_data); // 写入磁盘文件并加密，不管理缓存

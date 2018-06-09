@@ -5,6 +5,7 @@
 #include <ctime>
 #include <cstring>
 #include <set>
+#include <chrono>
 #include <dirent.h>
 
 using namespace std;
@@ -126,27 +127,36 @@ File* FileControl::FindFile(const char *path)
     return NULL;
 }
 
-void FileControl::Sync(const char *path, bool force)
+void FileControl::Sync(const char *path)
 {
     sync_mutex.lock();
-    if (file_cache.find(path) != file_cache.end() && (force || is_dirty.at(path)))
+    bool flag = false;
+    if (file_cache.find(path) != file_cache.end())
     {
         LOG_INFO << "Sync: " << path;
         if (is_dirty.at(path)) {
+            time_t timepoint1 = time(NULL);
+
             int fd = open(Resolve(path).c_str(), O_WRONLY|O_CREAT, 0666);
             SaveFile(path, fd, file_cache.at(path));
             close(fd);
+            is_dirty[path] = false;
+            flag = true;
+
+            LOG_INFO << "Sync Time1: " << path << " " << time(NULL)-timepoint1;
         }
-        file_cache.erase(file_cache.find(path));
-        last_hit.erase(last_hit.find(path));
-        is_dirty.erase(is_dirty.find(path));
-        last_modify.erase(last_modify.find(path));
         LOG_INFO << "Sync End: " << path;
     }
     sync_mutex.unlock();
+    
+    if (flag) {
+        time_t timepoint2 = time(NULL);
+        BroadcastFile(path);
+        LOG_INFO << "Sync Time2: " << path << " " << time(NULL)-timepoint2;
+    }
 }
 
-void FileControl::SyncDir(const char *path, bool force)
+void FileControl::SyncDir(const char *path)
 {
     sync_mutex.lock();
     LOG_INFO << "SyncDir: " << path;
@@ -161,14 +171,31 @@ void FileControl::SyncDir(const char *path, bool force)
     sync_mutex.unlock();
     for(const auto& name: files)
     {
-        Sync(name.c_str(), force);
+        Sync(name.c_str());
     }
 }
 
-data_t FileControl::Touch(const char *path)
+void FileControl::ClearCache(const char *path)
+{
+    sync_mutex.lock();
+    if (file_cache.find(path) != file_cache.end())
+    {
+        LOG_INFO << "ClearCache: " << path;
+        ASSERT(is_dirty.at(path) == false);
+        file_cache.erase(file_cache.find(path));
+        last_hit.erase(last_hit.find(path));
+        is_dirty.erase(is_dirty.find(path));
+        last_modify.erase(last_modify.find(path));
+        LOG_INFO << "ClearCache End: " << path;
+    }
+    sync_mutex.unlock();
+}
+
+data_t FileControl::Touch(const char *path, bool readonly)
 {
     sync_mutex.lock();
     LOG_INFO << "Touch: " << path;
+    
     if (file_cache.find(path) == file_cache.end())
     {
         file_cache[path] = LoadFile(path);
@@ -176,20 +203,11 @@ data_t FileControl::Touch(const char *path)
         is_dirty[path] = false;
     }
     last_hit[path] = time(NULL);
+    is_dirty[path] |= !readonly;
+
     LOG_INFO << "Touch End: " << path;
     sync_mutex.unlock();
     return file_cache.at(path);
-}
-
-void FileControl::MarkDirty(const char *path)
-{
-    sync_mutex.lock();
-    LOG_INFO << "MarkDirty: " << path;
-    ASSERT(file_cache.find(path) != file_cache.end());
-    is_dirty[path] = true;
-    last_modify[path] = time(NULL);
-    LOG_INFO << "MarkDirty End: " << path;
-    sync_mutex.unlock();
 }
 
 int FileControl::NewFile(const char *path, int flags, mode_t mode)
@@ -244,13 +262,12 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
     File* x = FindFile(path);
     ASSERT(x != NULL);
 
-    data_t decoded_data = Touch(path);
+    data_t decoded_data = Touch(path, false);
     size_t file_size = decoded_data->size()-x->extra_length;
     file_size = max(file_size, offset + size);
     decoded_data->resize((file_size+15)/16*16);
 
     memcpy(decoded_data->data()+offset, buf, size);
-    MarkDirty(path);
 
     x->extra_length = decoded_data->size() - file_size;
     // if (SaveFile(path, fd, decoded_data) == -1) return -1;
@@ -258,7 +275,7 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
     x->timestamp = time(NULL);
 
     SaveCFG();
-    BroadcastFile(path);
+    // BroadcastFile(path);
 
     return size;
 }
@@ -491,6 +508,12 @@ void FileControl::StartThread()
                 }
             } else if (head.type == packet_type_modify) {
                 LOG_INFO << "packet_type_modify " << head.filename;
+                ModifyPacket modify = *(ModifyPacket*)(data->data()+sizeof(PacketHead));
+                if (data->size() != sizeof(PacketHead)+sizeof(ModifyPacket)+modify.payload_size) {
+                    LOG_ERROR << "modify packet size unmatch";
+                    continue;
+                }
+
                 File* x = FindFile(head.filename);
                 if (x != NULL && x->timestamp > head.time) continue;
                 if (x == NULL) {
@@ -503,14 +526,9 @@ void FileControl::StartThread()
                     fsync(fd);
                     close(fd);
                 }
+                x->is_deleted = false;
 
-                ModifyPacket modify = *(ModifyPacket*)(data->data()+sizeof(PacketHead));
-                if (data->size() != sizeof(PacketHead)+sizeof(ModifyPacket)+modify.payload_size) {
-                    LOG_ERROR << "modify packet size unmatch";
-                    continue;
-                }
-
-                data_t decoded_data = Touch(x->filename);
+                data_t decoded_data = Touch(x->filename, false);
                 ASSERT(decoded_data != nullptr);
                 decoded_data->resize(modify.total_size);
                 ASSERT(decoded_data->size() % 16 == 0);
@@ -518,15 +536,14 @@ void FileControl::StartThread()
 
                 x->extra_length = modify.total_size - modify.file_size;
                 x->timestamp = head.time;
-                x->is_deleted = false;
-                MarkDirty(x->filename);
                 
                 SaveCFG();
             } else if (head.type == packet_type_delete) {
                 LOG_INFO << "packet_type_delete " << head.filename;
                 File* x = FindFile(head.filename);
                 if (x == NULL || x->timestamp > head.time) continue;
-                Sync(head.filename, true);
+                Sync(head.filename);
+                ClearCache(head.filename);
                 if (x->is_deleted == false) {
                     unlink(Resolve(x->filename).c_str());
                 }
@@ -540,7 +557,38 @@ void FileControl::StartThread()
     });
 
     sync_thread = thread([this]() {
-        // FIXME
+        while(true) {
+
+            { // need sync
+                sync_mutex.lock();
+                vector<string> files;
+                for(auto it: file_cache) {
+                    if (is_dirty.at(it.first) && last_modify.at(it.first)+2<time(NULL)) { // 距上次修改超过2秒钟则同步
+                        files.push_back(it.first);
+                    }
+                }
+                sync_mutex.unlock();
+                for(const auto& name: files) {
+                    Sync(name.c_str());
+                }
+            }
+            
+            { // need free
+                sync_mutex.lock();
+                vector<string> files;
+                for(auto it: file_cache) {
+                    if (last_hit.at(it.first)+30<time(NULL)) { // 距上次访问超过30秒钟则释放内存
+                        files.push_back(it.first);
+                    }
+                }
+                sync_mutex.unlock();
+                for(const auto& name: files) {
+                    ClearCache(name.c_str());
+                }
+            }
+
+            this_thread::sleep_for(chrono::seconds(1));
+        }
     });
 }
 

@@ -9,8 +9,6 @@ using namespace std;
 #define UDP_PORT_START 7645
 #define UDP_PORT_END 7655
 
-#define BUF_SIZE (MAX_CHUNK_SIZE*2)
-
 class Networking
 {
 public:

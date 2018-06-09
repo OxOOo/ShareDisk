@@ -61,16 +61,18 @@ bool Networking::Listen()
 
 data_t Networking::Recv()
 {
-    char buf[BUF_SIZE];
+    data_t packet_data = CreateData();
     socklen_t len;
     int count;
     struct sockaddr_in remote_addr; //remote_addr用于记录发送方的地址信息
 
+    packet_data->resize(1<<16);
+
     while(1)
     {
-        memset(buf, 0, BUF_SIZE);
+        memset(packet_data->data(), 0, packet_data->size());
         len = sizeof(remote_addr);
-        count = recvfrom(listen_fd, buf, BUF_SIZE, 0, (struct sockaddr*)&remote_addr, &len);  //recvfrom是拥塞函数，没有数据就一直拥塞
+        count = recvfrom(listen_fd, packet_data->data(), packet_data->size(), 0, (struct sockaddr*)&remote_addr, &len);  //recvfrom是拥塞函数，没有数据就一直拥塞
         if(count == -1)
         {
             perror("recieve data fail:");
@@ -83,7 +85,7 @@ data_t Networking::Recv()
             LOG_ERROR << "Message Too Small";
             continue;
         }
-        MessageHead head = *(MessageHead*)buf;
+        MessageHead head = *(MessageHead*)packet_data->data();
         uint32_t payload_real_length;
         uint32_t payload_total_length;
         if (!CheckHead(head, payload_real_length, payload_total_length))
@@ -107,7 +109,7 @@ data_t Networking::Recv()
             uint8_t* content = (uint8_t*)&head;
             uint8_t encrypted[sizeof(MessageHead)];
             aes_encode((uint8_t*)&keys[i], sizeof(SecretKey), content, sizeof(MessageHead), encrypted);
-            if (memcmp(buf+sizeof(MessageHead), encrypted, sizeof(MessageHead)) == 0)
+            if (memcmp(packet_data->data()+sizeof(MessageHead), encrypted, sizeof(MessageHead)) == 0)
             {
                 secret_key_index = i;
                 break;
@@ -123,29 +125,30 @@ data_t Networking::Recv()
         
         data_t data = CreateData();
         data->resize(payload_total_length);
-        aes_decode((uint8_t*)&keys[secret_key_index], sizeof(SecretKey), (uint8_t*)buf+sizeof(MessageHead)*2, payload_total_length, data->data());
+        aes_decode((uint8_t*)&keys[secret_key_index], sizeof(SecretKey), packet_data->data()+sizeof(MessageHead)*2, payload_total_length, data->data());
         data->resize(payload_real_length);
 
         return data;
     }
 }
 
-void Networking::Broadcast(const SecretKey& key, data_t data)
+void Networking::Broadcast(const SecretKey& key, data_t _data)
 {
-    char buf[BUF_SIZE];
+    data_t data = Clone(_data);
+    data_t packet_data = CreateData();
+
     const uint32_t payload_real_length = data->size();
     const uint32_t payload_total_length = (payload_real_length + 16 - 1) / 16 * 16;
-    assert(sizeof(MessageHead)*2+payload_total_length <= BUF_SIZE);
+    const uint32_t size = sizeof(MessageHead)*2+payload_total_length;
+    data->resize(payload_total_length);
+
+    packet_data->resize(size);
 
     MessageHead head = CreateHead(payload_real_length, payload_total_length);
-    *(MessageHead*)buf = head;
-    aes_encode((uint8_t*)&key, sizeof(SecretKey), (uint8_t*)buf, sizeof(MessageHead), (uint8_t*)buf+sizeof(MessageHead));
+    *(MessageHead*)packet_data->data() = head;
+    aes_encode((uint8_t*)&key, sizeof(SecretKey), packet_data->data(), sizeof(MessageHead), packet_data->data()+sizeof(MessageHead));
+    aes_encode((uint8_t*)&key, sizeof(SecretKey), data->data(), payload_total_length, packet_data->data()+sizeof(MessageHead)*2);
 
-    char buf2[BUF_SIZE];
-    memcpy(buf2, data->data(), data->size());
-    aes_encode((uint8_t*)&key, sizeof(SecretKey), (uint8_t*)buf2, payload_total_length, (uint8_t*)buf+sizeof(MessageHead)*2);
-
-    const uint32_t size = sizeof(MessageHead)*2+payload_total_length;
     for(int port = UDP_PORT_START; port <= UDP_PORT_END; port ++)
     {
         struct sockaddr_in s;
@@ -153,7 +156,7 @@ void Networking::Broadcast(const SecretKey& key, data_t data)
         s.sin_family = AF_INET;
         s.sin_port = (in_port_t)htons(port);
         s.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-        if(sendto(listen_fd, buf, size, 0, (struct sockaddr *)&s, sizeof(struct sockaddr_in)) < 0)
+        if(sendto(listen_fd, packet_data->data(), size, 0, (struct sockaddr *)&s, sizeof(struct sockaddr_in)) < 0)
         {
             perror("sendto:");
         }

@@ -223,7 +223,8 @@ static int xmp_unlink(const char *path)
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
-	control->Sync(path, true);
+	control->Sync(path);
+	control->ClearCache(path);
 	res = control->DeleteFile(path);
 	if (res == -1)
 		return -errno;
@@ -292,8 +293,10 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 	if (flags)
 		return -EINVAL;
 
-	control->Sync(from, true);
-	control->Sync(to, true);
+	control->Sync(from);
+	control->ClearCache(from);
+	control->Sync(to);
+	control->ClearCache(to);
 	res = control->RenameFile(from, to);
 	if (res == -1)
 		return -errno;

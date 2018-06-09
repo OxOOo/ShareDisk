@@ -8,13 +8,12 @@
 
 using namespace std;
 
-#define MAX_CHUNK_SIZE (4*1024) // 最大数据块大小
-
 typedef shared_ptr<vector<uint8_t> > data_t; // 用来储存数据
 
 data_t CreateData();
 data_t CreateData(const string& data);
 data_t CreateData(void* data, size_t size);
+data_t Clone(data_t data);
 data_t Concat(data_t a, data_t b);
 
 // 密钥

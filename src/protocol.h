@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define FILENAME_MAX_SIZE 512
-#define CHUNK_MAX_SIZE 1024
+#define CHUNK_MAX_SIZE (1024*40)
 
 const int32_t packet_type_online = 0;
 const int32_t packet_type_modify = 1;
