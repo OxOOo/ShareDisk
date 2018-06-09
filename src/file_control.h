@@ -25,7 +25,7 @@ struct File
     char filename[FILENAME_MAX_SIZE];
     time_t timestamp;
     bool is_deleted;
-    int extra_length;
+    uint32_t extra_length;
     uint8_t extra_data[16];
 };
 
@@ -55,6 +55,9 @@ private:
     size_t FileSize(const string& filepath) const;
     void LoadCFG();
     void SaveCFG();
+
+    data_t LoadFile(const char* path); // 从磁盘上载入并解码，不管理缓存
+    int SaveFile(const char* path, int fd, data_t decoded_data); // 写入磁盘文件并加密，不管理缓存
 
     void StartThread();
     void BroadcastFile(const char* path);

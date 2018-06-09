@@ -159,38 +159,10 @@ int FileControl::ReadFile(const char *path, int fd, char *buf, size_t size, off_
     File *x = FindFile(path);
     ASSERT(x != NULL);
 
-    int key_index = -1;
-    for(int i = 0; i < (int)keys.size(); i ++)
-        if (keys[i].name == FirstPath(path))
-        {
-            key_index = i;
-        }
-    LOG_INFO << "FirstPath(path) = " << FirstPath(path);
-    LOG_INFO << "key_index = " << key_index;
-    ASSERT(key_index >= 0);
+    data_t decoded_data = LoadFile(path);
+    if (decoded_data == nullptr) return -1;
 
-    data_t file_data = CreateData();
-    data_t decoded_data = CreateData();
-    size_t file_size = FileSize(Resolve(path));
-    file_data->resize(file_size+x->extra_length);
-    decoded_data->resize(file_size+x->extra_length);
-    ASSERT(file_data->size()%16 == 0);
-
-    LOG_INFO << "ReadFile[0]";
-
-    int res = pread(fd, file_data->data(), file_size, 0);
-    if (res == -1) {
-        LOG_ERROR << "pread : " << res << " " << strerror(errno);
-        return res;
-    }
-
-    LOG_INFO << "ReadFile[1]";
-
-    memcpy(file_data->data()+file_size, x->extra_data, x->extra_length);
-    LOG_INFO << "ReadFile[2]";
-    aes_decode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), file_data->data(), file_data->size(), decoded_data->data());
-    LOG_INFO << "ReadFile[3]";
-
+    size_t file_size = decoded_data->size()-x->extra_length;
     offset = min((size_t)offset, file_size);
     size = min(size, file_size-offset);
     memcpy(buf, decoded_data->data()+offset, size);
@@ -206,70 +178,17 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
     File* x = FindFile(path);
     ASSERT(x != NULL);
 
-    int key_index = -1;
-    for(int i = 0; i < (int)keys.size(); i ++)
-        if (keys[i].name == FirstPath(path))
-        {
-            key_index = i;
-        }
-    LOG_INFO << "FirstPath(path) = " << FirstPath(path);
-    LOG_INFO << "key_index = " << key_index;
-    ASSERT(key_index >= 0);
+    data_t decoded_data = LoadFile(path);
+    size_t file_size = decoded_data->size()-x->extra_length;
+    file_size = max(file_size, offset + size);
+    decoded_data->resize((file_size+15)/16*16);
 
-    data_t file_data = CreateData();
-    data_t decoded_data = CreateData();
-    size_t file_size = FileSize(Resolve(path));
-    file_data->resize(file_size+x->extra_length);
-    decoded_data->resize(file_size+x->extra_length);
-    ASSERT(file_data->size()%16 == 0);
-
-    LOG_INFO << "WriteFile[0] " << file_data->size() << " " << file_size << " " << x->extra_length;
-    LOG_INFO << offset << " " << size;
-
-    { // read all data
-        int rfd = open(Resolve(path).c_str(), O_RDONLY);
-        int res = pread(rfd, file_data->data(), file_size, 0);
-        if (res == -1) {
-            LOG_ERROR << "pread : " << res << " " << strerror(errno);
-            return res;
-        }
-        close(rfd);
-    }
-
-    LOG_INFO << "WriteFile[1]";
-
-    memcpy(file_data->data()+file_size, x->extra_data, x->extra_length);
-    LOG_INFO << "WriteFile[2]";
-    aes_decode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), file_data->data(), file_data->size(), decoded_data->data());
-    LOG_INFO << "WriteFile[3]";
-
-    decoded_data->resize(max(file_size, size+offset));
-    LOG_INFO << "WriteFile[4]";
     memcpy(decoded_data->data()+offset, buf, size);
-    LOG_INFO << "WriteFile[5]";
 
-    size_t extra_length = (decoded_data->size()+15)/16*16 - decoded_data->size();
-    size_t total_length = decoded_data->size()+extra_length;
-    LOG_INFO << "WriteFile[6]";
-    decoded_data->resize(total_length);
-    file_data->resize(total_length);
-    LOG_INFO << "WriteFile[7]";
-    aes_encode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), decoded_data->data(), decoded_data->size(), file_data->data());
-    LOG_INFO << "WriteFile[8]";
-
-    int res = pwrite(fd, file_data->data(), max(file_size, size+offset), 0);
-    if (res == -1) {
-        LOG_ERROR << "pwrite : " << res << " " << strerror(errno);
-        return res;
-    }
-    fsync(fd);
-    LOG_INFO << "WriteFile[9]";
+    x->extra_length = decoded_data->size() - file_size;
+    if (SaveFile(path, fd, decoded_data) == -1) return -1;
     x->is_deleted = false;
     x->timestamp = time(NULL);
-    x->extra_length = extra_length;
-    memcpy(x->extra_data, file_data->data()+max(file_size, size+offset), extra_length);
-
-    LOG_INFO << max(file_size, size+offset) << " " << max(file_size, size+offset)/1024;
 
     SaveCFG();
     BroadcastFile(path);
@@ -334,6 +253,89 @@ int FileControl::RenameFile(const char *from, const char *to)
     return res;
 }
 
+data_t FileControl::LoadFile(const char* path)
+{
+    LOG_INFO << "LoadFile: " << path;
+
+    const File* x = FindFile(path);
+    if (x == NULL || x->is_deleted) return nullptr;
+
+    int key_index = -1;
+    for(int i = 0; i < (int)keys.size(); i ++)
+        if (keys[i].name == FirstPath(path))
+        {
+            key_index = i;
+        }
+    LOG_INFO << "FirstPath(path) = " << FirstPath(path);
+    LOG_INFO << "key_index = " << key_index;
+    ASSERT(key_index >= 0);
+
+    size_t file_size = FileSize(Resolve(path));
+    if (file_size == 0) return CreateData();
+
+    data_t file_data = CreateData();
+    data_t decoded_data = CreateData();
+    file_data->resize(file_size+x->extra_length);
+    decoded_data->resize(file_size+x->extra_length);
+    LOG_INFO << file_size << " " << x->extra_length;
+    ASSERT(file_data->size()%16 == 0);
+
+    int rfd = open(Resolve(path).c_str(), O_RDONLY);
+    int res = pread(rfd, file_data->data(), file_size, 0);
+    if (res == -1) {
+        LOG_ERROR << "pread : " << res << " " << strerror(errno);
+        return nullptr;
+    }
+    close(rfd);
+
+    memcpy(file_data->data()+file_size, x->extra_data, x->extra_length);
+    aes_decode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), file_data->data(), file_data->size(), decoded_data->data());
+
+    return decoded_data;
+}
+
+int FileControl::SaveFile(const char* path, int fd, data_t decoded_data)
+{
+    LOG_INFO << "SaveFile: " << path << " " << decoded_data->size();
+
+    File* x = FindFile(path);
+    ASSERT(x != NULL && !x->is_deleted);
+    ASSERT(decoded_data->size() % 16 == 0);
+    ASSERT(decoded_data->size() >= x->extra_length);
+
+    int key_index = -1;
+    for(int i = 0; i < (int)keys.size(); i ++)
+        if (keys[i].name == FirstPath(path))
+        {
+            key_index = i;
+        }
+    LOG_INFO << "FirstPath(path) = " << FirstPath(path);
+    LOG_INFO << "key_index = " << key_index;
+    ASSERT(key_index >= 0);
+
+    LOG_INFO << decoded_data->size() << " " << x->extra_length;
+
+    data_t file_data = CreateData();
+    file_data->resize(decoded_data->size());
+    
+    aes_encode((uint8_t*)&keys[key_index].key, sizeof(keys[key_index].key), decoded_data->data(), decoded_data->size(), file_data->data());
+
+    int res = pwrite(fd, file_data->data(), file_data->size()-x->extra_length, 0);
+    if (res == -1) {
+        LOG_ERROR << "pwrite : " << res << " " << strerror(errno);
+        return res;
+    }
+    res = ftruncate(fd, file_data->size()-x->extra_length);
+    if (res == -1) {
+        LOG_ERROR << "ftruncate : " << res << " " << strerror(errno);
+        return res;
+    }
+    fsync(fd);
+    memcpy(x->extra_data, file_data->data()+(file_data->size()-x->extra_length), x->extra_length);
+
+    return res;
+}
+
 string FileControl::PathJoin(string A, string B) const
 {
     if (A[A.length()-1] == '/') A = A.substr(0, A.length()-1);
@@ -351,7 +353,7 @@ string FileControl::FirstPath(const string& path) const
 size_t FileControl::FileSize(const string& filepath) const
 {
     struct stat st;
-    stat(filepath.c_str(), &st);
+    if (stat(filepath.c_str(), &st) != 0) return 0;
     return st.st_size;
 }
 
@@ -428,6 +430,10 @@ void FileControl::StartThread()
                     memcpy(file.filename, head.filename, FILENAME_MAX_SIZE);
                     files.push_back(file);
                     x = &files[files.size()-1];
+
+                    int fd = open(Resolve(file.filename).c_str(), O_WRONLY|O_CREAT, 0666);
+                    fsync(fd);
+                    close(fd);
                 }
 
                 ModifyPacket modify = *(ModifyPacket*)(data->data()+sizeof(PacketHead));
@@ -436,20 +442,20 @@ void FileControl::StartThread()
                     continue;
                 }
 
-                int fd = open(Resolve(x->filename).c_str(), O_RDWR|O_CREAT, 0666);
-                if (modify.payload_offset <= modify.file_size) {
-                    int64_t in_file_size = min(modify.file_size, modify.payload_offset+modify.payload_size)-modify.payload_offset;
-                    pwrite(fd, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), in_file_size, modify.payload_offset);
-                    memcpy(x->extra_data, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket)+in_file_size, modify.payload_size-in_file_size);
-                } else {
-                    int64_t extra_offset = modify.payload_offset - modify.file_size;
-                    memcpy(x->extra_data+extra_offset, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), modify.payload_size);
-                }
-                close(fd);
-                
+                data_t decoded_data = LoadFile(x->filename);
+                if (decoded_data == nullptr) decoded_data = CreateData();
+                decoded_data->resize(modify.total_size);
+                ASSERT(decoded_data->size() % 16 == 0);
+                memcpy(decoded_data->data()+modify.payload_offset, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), modify.payload_size);
+
                 x->extra_length = modify.total_size - modify.file_size;
                 x->timestamp = head.time;
                 x->is_deleted = false;
+
+                int fd = open(Resolve(x->filename).c_str(), O_WRONLY|O_CREAT, 0666);
+                SaveFile(x->filename, fd, decoded_data);
+                close(fd);
+                
                 SaveCFG();
             } else if (head.type == packet_type_delete) {
                 LOG_INFO << "packet_type_delete " << head.filename;
@@ -472,7 +478,7 @@ void FileControl::BroadcastFile(const char* path)
 {
     File* x = FindFile(path);
     ASSERT(x != NULL);
-
+    
     int key_index = -1;
     for(int i = 0; i < (int)keys.size(); i ++)
         if (FirstPath(path) == keys[i].name) {
@@ -484,29 +490,22 @@ void FileControl::BroadcastFile(const char* path)
         LOG_INFO << "send delete " << x->filename;
         PacketHead head;
         head.type = packet_type_delete;
-        head.time = x->timestamp;
+        head.time = x->timestamp-1;
         memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
         net->Broadcast(keys[key_index].key, CreateData(&head, sizeof(head)));
     } else {
-        LOG_INFO << "send modify " << x->filename;
-        data_t file_data = CreateData();
-        size_t file_size = FileSize(Resolve(x->filename));
-        file_data->resize(file_size + x->extra_length);
-        int fd = open(Resolve(x->filename).c_str(), O_RDONLY);
-        pread(fd, file_data->data(), file_size, 0);
-        close(fd);
-        memcpy(file_data->data()+file_size, x->extra_data, x->extra_length);
-
-        for(size_t pos = 0; pos == 0 || pos < file_data->size(); pos += CHUNK_MAX_SIZE) {
-            size_t size = min((size_t)CHUNK_MAX_SIZE, file_data->size() - pos);
+        data_t decoded_data = LoadFile(path);
+        LOG_INFO << "send modify " << x->filename << " " << decoded_data->size() << " " << x->extra_length;
+        for(size_t pos = 0; pos == 0 || pos < decoded_data->size(); pos += CHUNK_MAX_SIZE) {
+            int size = min((int)CHUNK_MAX_SIZE, (int)decoded_data->size() - (int)pos);
 
             PacketHead head;
             head.type = packet_type_modify;
-            head.time = x->timestamp;
+            head.time = x->timestamp-1;
             memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
             ModifyPacket modify;
-            modify.file_size = file_size;
-            modify.total_size = file_data->size();
+            modify.file_size = decoded_data->size()-x->extra_length;
+            modify.total_size = decoded_data->size();
             modify.payload_offset = pos;
             modify.payload_size = size;
 
@@ -514,7 +513,7 @@ void FileControl::BroadcastFile(const char* path)
             data->resize(sizeof(head)+sizeof(modify)+size);
             memcpy(data->data(), &head, sizeof(head));
             memcpy(data->data()+sizeof(head), &modify, sizeof(modify));
-            memcpy(data->data()+sizeof(head)+sizeof(modify), file_data->data()+pos, size);
+            memcpy(data->data()+sizeof(head)+sizeof(modify), decoded_data->data()+pos, size);
 
             net->Broadcast(keys[key_index].key, data);
         }
