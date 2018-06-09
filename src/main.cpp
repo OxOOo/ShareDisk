@@ -59,7 +59,7 @@ FileControl* control = NULL;
 static void *xmp_init(struct fuse_conn_info *conn,
 		      struct fuse_config *cfg)
 {
-	//LOG_INFO << "xmp_init";
+	LOG_INFO << "xmp_init";
 	(void) conn;
 	cfg->use_ino = 1;
 
@@ -82,25 +82,29 @@ static void *xmp_init(struct fuse_conn_info *conn,
 static int xmp_getattr(const char *path, struct stat *stbuf,
 		       struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_getattr";
+	LOG_INFO << "xmp_getattr: " << path;
 	(void) fi;
 	int res;
 
+	control->Sync(path);
 	res = lstat(control->Resolve(path).c_str(), stbuf);
+	LOG_INFO << "xmp_getattr end: " << path;
 	if (res == -1)
 		return -errno;
+	if (control->FindFile(path)) stbuf->st_mtime = control->FindFile(path)->timestamp;
 
 	return 0;
 }
 
 static int xmp_access(const char *path, int mask)
 {
-	//LOG_INFO << "xmp_access";
+	LOG_INFO << "xmp_access";
 	int res;
 
 	if (!control->IsAccessible(path))
 		return -EACCES;
 
+	control->Sync(path);
 	res = access(control->Resolve(path).c_str(), mask);
 	if (res == -1)
 		return -errno;
@@ -110,7 +114,7 @@ static int xmp_access(const char *path, int mask)
 
 static int xmp_readlink(const char *path, char *buf, size_t size)
 {
-	//LOG_INFO << "xmp_readlink";
+	LOG_INFO << "xmp_readlink";
 	return -EACCES;
 /*
 	int res;
@@ -135,7 +139,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fi,
 		       enum fuse_readdir_flags flags)
 {
-	//LOG_INFO << "xmp_readdir";
+	LOG_INFO << "xmp_readdir";
 	DIR *dp;
 	struct dirent *de;
 
@@ -152,6 +156,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		return 0;
 	}
 
+	control->SyncDir(path);
 	dp = opendir(control->Resolve(path).c_str());
 	if (dp == NULL)
 		return -errno;
@@ -171,7 +176,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 {
-	//LOG_INFO << "xmp_mknod";
+	LOG_INFO << "xmp_mknod";
 	int res;
 	
 	if (!control->IsAccessible(path))
@@ -195,7 +200,7 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 
 static int xmp_mkdir(const char *path, mode_t mode)
 {
-	//LOG_INFO << "xmp_mkdir";
+	LOG_INFO << "xmp_mkdir";
 	int res;
 
 	if (!control->IsAccessible(path))
@@ -210,7 +215,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 
 static int xmp_unlink(const char *path)
 {
-	//LOG_INFO << "xmp_unlink";
+	LOG_INFO << "xmp_unlink";
 	int res;
 
 	if (!control->IsAccessible(path))
@@ -218,6 +223,7 @@ static int xmp_unlink(const char *path)
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
+	control->Sync(path, true);
 	res = control->DeleteFile(path);
 	if (res == -1)
 		return -errno;
@@ -227,7 +233,7 @@ static int xmp_unlink(const char *path)
 
 static int xmp_rmdir(const char *path)
 {
-	//LOG_INFO << "xmp_rmdir";
+	LOG_INFO << "xmp_rmdir";
 	int res;
 
 	if (!control->IsAccessible(path))
@@ -235,6 +241,7 @@ static int xmp_rmdir(const char *path)
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
+	control->SyncDir(path);
 	res = rmdir(control->Resolve(path).c_str());
 	if (res == -1)
 		return -errno;
@@ -244,7 +251,7 @@ static int xmp_rmdir(const char *path)
 
 static int xmp_symlink(const char *from, const char *to)
 {
-	//LOG_INFO << "xmp_symlink";
+	LOG_INFO << "xmp_symlink";
 	return -EACCES;
 /*
 	int res;
@@ -274,7 +281,7 @@ static int xmp_symlink(const char *from, const char *to)
 
 static int xmp_rename(const char *from, const char *to, unsigned int flags)
 {
-	//LOG_INFO << "xmp_rename";
+	LOG_INFO << "xmp_rename";
 	int res;
 
 	if (!control->IsAccessible(from) || !control->IsAccessible(to))
@@ -285,6 +292,8 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 	if (flags)
 		return -EINVAL;
 
+	control->Sync(from, true);
+	control->Sync(to, true);
 	res = control->RenameFile(from, to);
 	if (res == -1)
 		return -errno;
@@ -294,7 +303,7 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 
 static int xmp_link(const char *from, const char *to)
 {
-	//LOG_INFO << "xmp_link";
+	LOG_INFO << "xmp_link";
 	return -EACCES;
 /*
 	int res;
@@ -325,13 +334,14 @@ static int xmp_link(const char *from, const char *to)
 static int xmp_chmod(const char *path, mode_t mode,
 		     struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_chmod";
+	LOG_INFO << "xmp_chmod";
 	(void) fi;
 	int res;
 
 	if (!control->IsAccessible(path))
 		return -EACCES;
 
+	control->Sync(path);
 	res = chmod(control->Resolve(path).c_str(), mode);
 	if (res == -1)
 		return -errno;
@@ -342,7 +352,7 @@ static int xmp_chmod(const char *path, mode_t mode,
 static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 		     struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_chown";
+	LOG_INFO << "xmp_chown";
 	(void) fi;
 	int res;
 
@@ -351,6 +361,7 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
+	control->Sync(path);
 	res = lchown(control->Resolve(path).c_str(), uid, gid);
 	if (res == -1)
 		return -errno;
@@ -361,7 +372,7 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 static int xmp_truncate(const char *path, off_t size,
 			struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_truncate";
+	LOG_INFO << "xmp_truncate";
 	return -EACCES;
 /*
 	int res;
@@ -392,10 +403,11 @@ static int xmp_truncate(const char *path, off_t size,
 static int xmp_utimens(const char *path, const struct timespec ts[2],
 		       struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_utimens";
+	LOG_INFO << "xmp_utimens";
 	(void) fi;
 	int res;
 
+	control->Sync(path);
 	/* don't use utime/utimes since they follow symlinks */
 	res = utimensat(0, control->Resolve(path).c_str(), ts, AT_SYMLINK_NOFOLLOW);
 	if (res == -1)
@@ -408,7 +420,7 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 static int xmp_create(const char *path, mode_t mode,
 		      struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_create";
+	LOG_INFO << "xmp_create";
 	int res;
 
 	if (!control->IsAccessible(path))
@@ -416,6 +428,7 @@ static int xmp_create(const char *path, mode_t mode,
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
+	control->Sync(path);
 	res = control->NewFile(path, fi->flags, mode);
 	if (res == -1)
 		return -errno;
@@ -426,7 +439,7 @@ static int xmp_create(const char *path, mode_t mode,
 
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_open";
+	LOG_INFO << "xmp_open";
 	int res;
 
 	if (!control->IsAccessible(path))
@@ -434,6 +447,7 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	if (control->IsTopLevel(path))
 		return -EACCES;
 
+	control->Sync(path);
 	res = open(control->Resolve(path).c_str(), fi->flags);
 	if (res == -1)
 		return -errno;
@@ -445,7 +459,7 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_read";
+	LOG_INFO << "xmp_read";
 	int fd;
 	int res;
 
@@ -474,7 +488,7 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 static int xmp_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_write";
+	LOG_INFO << "xmp_write";
 	int fd;
 	int res;
 
@@ -486,12 +500,12 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 	(void) fi;
 	if(fi == NULL) {
 		fd = open(control->Resolve(path).c_str(), O_WRONLY);
-		//LOG_INFO << "xmp_write fd 1";
+		LOG_INFO << "xmp_write fd 1";
 	} else {
 		fd = fi->fh;
-		//LOG_INFO << "xmp_write fd 2";
+		LOG_INFO << "xmp_write fd 2";
 	}
-	//LOG_INFO << "xmp_write fd get = " << fd;
+	LOG_INFO << "xmp_write fd get = " << fd;
 	
 	if (fd == -1)
 		return -errno;
@@ -507,9 +521,10 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 
 static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
-	//LOG_INFO << "xmp_statfs";
+	LOG_INFO << "xmp_statfs";
 	int res;
 
+	control->Sync(path);
 	res = statvfs(control->Resolve(path).c_str(), stbuf);
 	if (res == -1)
 		return -errno;
@@ -519,8 +534,8 @@ static int xmp_statfs(const char *path, struct statvfs *stbuf)
 
 static int xmp_release(const char *path, struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_release";
-	(void) path;
+	LOG_INFO << "xmp_release";
+	control->Sync(path);
 	close(fi->fh);
 	return 0;
 }
@@ -528,13 +543,13 @@ static int xmp_release(const char *path, struct fuse_file_info *fi)
 static int xmp_fsync(const char *path, int isdatasync,
 		     struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_fsync";
+	LOG_INFO << "xmp_fsync:" << path;
 	/* Just a stub.	 This method is optional and can safely be left
 	   unimplemented */
 
-	(void) path;
 	(void) isdatasync;
 	(void) fi;
+	control->Sync(path);
 	return 0;
 }
 
@@ -542,7 +557,7 @@ static int xmp_fsync(const char *path, int isdatasync,
 static int xmp_fallocate(const char *path, int mode,
 			off_t offset, off_t length, struct fuse_file_info *fi)
 {
-	//LOG_INFO << "xmp_fallocate";
+	LOG_INFO << "xmp_fallocate";
 	return -EACCES;
 	// int fd;
 	// int res;
@@ -579,7 +594,8 @@ static int xmp_fallocate(const char *path, int mode,
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
-	//LOG_INFO << "xmp_setxattr";
+	LOG_INFO << "xmp_setxattr";
+	control->Sync(path);
 	int res = lsetxattr(control->Resolve(path).c_str(), name, value, size, flags);
 	if (res == -1)
 		return -errno;
@@ -589,7 +605,8 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
-	//LOG_INFO << "xmp_getxattr";
+	LOG_INFO << "xmp_getxattr";
+	control->Sync(path);
 	int res = lgetxattr(control->Resolve(path).c_str(), name, value, size);
 	if (res == -1)
 		return -errno;
@@ -598,7 +615,8 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
-	//LOG_INFO << "xmp_listxattr";
+	LOG_INFO << "xmp_listxattr";
+	control->Sync(path);
 	int res = llistxattr(control->Resolve(path).c_str(), list, size);
 	if (res == -1)
 		return -errno;
@@ -607,7 +625,8 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 
 static int xmp_removexattr(const char *path, const char *name)
 {
-	//LOG_INFO << "xmp_removexattr";
+	LOG_INFO << "xmp_removexattr";
+	control->Sync(path);
 	int res = lremovexattr(control->Resolve(path).c_str(), name);
 	if (res == -1)
 		return -errno;

@@ -6,6 +6,8 @@
 #include <vector>
 #include <stdint.h>
 #include <thread>
+#include <mutex>
+#include <map>
 
 #include "common.h"
 #include "networking.h"
@@ -43,6 +45,8 @@ public:
     vector<string> KeyNames() const;
 
     File* FindFile(const char *path);
+    void Sync(const char *path, bool force = false); // 如果有更新，将缓存同步到磁盘上
+    void SyncDir(const char *path, bool force = false); // 如果有更新，将缓存同步到磁盘上
     int NewFile(const char *path, int flags, mode_t mode);
     int ReadFile(const char *path, int fd, char *buf, size_t size, off_t offset);
     int WriteFile(const char *path, int fd, const char *buf, size_t size, off_t offset);
@@ -56,6 +60,9 @@ private:
     void LoadCFG();
     void SaveCFG();
 
+    data_t Touch(const char *path);
+    void MarkDirty(const char *path);
+
     data_t LoadFile(const char* path); // 从磁盘上载入并解码，不管理缓存
     int SaveFile(const char* path, int fd, data_t decoded_data); // 写入磁盘文件并加密，不管理缓存
 
@@ -68,7 +75,13 @@ private:
     vector<File> files;
     vector<KeyEntry> keys;
     Networking* net;
-    thread t;
+
+    thread recv_thread, sync_thread;
+    mutex sync_mutex;
+    map<string, time_t> last_hit;
+    map<string, time_t> last_modify;
+    map<string, data_t> file_cache;
+    map<string, bool> is_dirty;
 };
 
 #endif // _FILE_CONTROL_H_

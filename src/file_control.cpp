@@ -126,6 +126,72 @@ File* FileControl::FindFile(const char *path)
     return NULL;
 }
 
+void FileControl::Sync(const char *path, bool force)
+{
+    sync_mutex.lock();
+    if (file_cache.find(path) != file_cache.end() && (force || is_dirty.at(path)))
+    {
+        LOG_INFO << "Sync: " << path;
+        if (is_dirty.at(path)) {
+            int fd = open(Resolve(path).c_str(), O_WRONLY|O_CREAT, 0666);
+            SaveFile(path, fd, file_cache.at(path));
+            close(fd);
+        }
+        file_cache.erase(file_cache.find(path));
+        last_hit.erase(last_hit.find(path));
+        is_dirty.erase(is_dirty.find(path));
+        last_modify.erase(last_modify.find(path));
+        LOG_INFO << "Sync End: " << path;
+    }
+    sync_mutex.unlock();
+}
+
+void FileControl::SyncDir(const char *path, bool force)
+{
+    sync_mutex.lock();
+    LOG_INFO << "SyncDir: " << path;
+    vector<string> files;
+    for(const auto& it : file_cache)
+    {
+        if (it.first.length() >= strlen(path) && strncmp(it.first.c_str(), path, strlen(path)) == 0)
+        {
+            files.push_back(it.first);
+        }
+    }
+    sync_mutex.unlock();
+    for(const auto& name: files)
+    {
+        Sync(name.c_str(), force);
+    }
+}
+
+data_t FileControl::Touch(const char *path)
+{
+    sync_mutex.lock();
+    LOG_INFO << "Touch: " << path;
+    if (file_cache.find(path) == file_cache.end())
+    {
+        file_cache[path] = LoadFile(path);
+        last_modify[path] = 0;
+        is_dirty[path] = false;
+    }
+    last_hit[path] = time(NULL);
+    LOG_INFO << "Touch End: " << path;
+    sync_mutex.unlock();
+    return file_cache.at(path);
+}
+
+void FileControl::MarkDirty(const char *path)
+{
+    sync_mutex.lock();
+    LOG_INFO << "MarkDirty: " << path;
+    ASSERT(file_cache.find(path) != file_cache.end());
+    is_dirty[path] = true;
+    last_modify[path] = time(NULL);
+    LOG_INFO << "MarkDirty End: " << path;
+    sync_mutex.unlock();
+}
+
 int FileControl::NewFile(const char *path, int flags, mode_t mode)
 {
     LOG_INFO << "NewFile: " << path;
@@ -159,7 +225,7 @@ int FileControl::ReadFile(const char *path, int fd, char *buf, size_t size, off_
     File *x = FindFile(path);
     ASSERT(x != NULL);
 
-    data_t decoded_data = LoadFile(path);
+    data_t decoded_data = Touch(path);
     if (decoded_data == nullptr) return -1;
 
     size_t file_size = decoded_data->size()-x->extra_length;
@@ -178,15 +244,16 @@ int FileControl::WriteFile(const char *path, int fd, const char *buf, size_t siz
     File* x = FindFile(path);
     ASSERT(x != NULL);
 
-    data_t decoded_data = LoadFile(path);
+    data_t decoded_data = Touch(path);
     size_t file_size = decoded_data->size()-x->extra_length;
     file_size = max(file_size, offset + size);
     decoded_data->resize((file_size+15)/16*16);
 
     memcpy(decoded_data->data()+offset, buf, size);
+    MarkDirty(path);
 
     x->extra_length = decoded_data->size() - file_size;
-    if (SaveFile(path, fd, decoded_data) == -1) return -1;
+    // if (SaveFile(path, fd, decoded_data) == -1) return -1;
     x->is_deleted = false;
     x->timestamp = time(NULL);
 
@@ -258,7 +325,8 @@ data_t FileControl::LoadFile(const char* path)
     LOG_INFO << "LoadFile: " << path;
 
     const File* x = FindFile(path);
-    if (x == NULL || x->is_deleted) return nullptr;
+    //if (x == NULL || x->is_deleted) return nullptr;
+    ASSERT(x != NULL && !x->is_deleted);
 
     int key_index = -1;
     for(int i = 0; i < (int)keys.size(); i ++)
@@ -394,7 +462,7 @@ void debug(data_t data, int pos = 0)
 
 void FileControl::StartThread()
 {
-    t = thread([this]() {
+    recv_thread = thread([this]() {
         { // online
             PacketHead head;
             head.type = packet_type_online;
@@ -442,8 +510,8 @@ void FileControl::StartThread()
                     continue;
                 }
 
-                data_t decoded_data = LoadFile(x->filename);
-                if (decoded_data == nullptr) decoded_data = CreateData();
+                data_t decoded_data = Touch(x->filename);
+                ASSERT(decoded_data != nullptr);
                 decoded_data->resize(modify.total_size);
                 ASSERT(decoded_data->size() % 16 == 0);
                 memcpy(decoded_data->data()+modify.payload_offset, data->data()+sizeof(PacketHead)+sizeof(ModifyPacket), modify.payload_size);
@@ -451,16 +519,14 @@ void FileControl::StartThread()
                 x->extra_length = modify.total_size - modify.file_size;
                 x->timestamp = head.time;
                 x->is_deleted = false;
-
-                int fd = open(Resolve(x->filename).c_str(), O_WRONLY|O_CREAT, 0666);
-                SaveFile(x->filename, fd, decoded_data);
-                close(fd);
+                MarkDirty(x->filename);
                 
                 SaveCFG();
             } else if (head.type == packet_type_delete) {
                 LOG_INFO << "packet_type_delete " << head.filename;
                 File* x = FindFile(head.filename);
                 if (x == NULL || x->timestamp > head.time) continue;
+                Sync(head.filename, true);
                 if (x->is_deleted == false) {
                     unlink(Resolve(x->filename).c_str());
                 }
@@ -471,6 +537,10 @@ void FileControl::StartThread()
                 LOG_ERROR << "unknow packet type";
             }
         }
+    });
+
+    sync_thread = thread([this]() {
+        // FIXME
     });
 }
 
@@ -494,7 +564,7 @@ void FileControl::BroadcastFile(const char* path)
         memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
         net->Broadcast(keys[key_index].key, CreateData(&head, sizeof(head)));
     } else {
-        data_t decoded_data = LoadFile(path);
+        data_t decoded_data = Touch(path);
         LOG_INFO << "send modify " << x->filename << " " << decoded_data->size() << " " << x->extra_length;
         for(size_t pos = 0; pos == 0 || pos < decoded_data->size(); pos += CHUNK_MAX_SIZE) {
             int size = min((int)CHUNK_MAX_SIZE, (int)decoded_data->size() - (int)pos);
