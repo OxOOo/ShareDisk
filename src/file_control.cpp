@@ -628,26 +628,28 @@ void FileControl::BroadcastFile(const char* path)
     } else {
         data_t decoded_data = Touch(path);
         LOG_INFO << "send modify " << x->filename << " " << decoded_data->size() << " " << x->extra_length;
-        for(size_t pos = 0; pos == 0 || pos < decoded_data->size(); pos += CHUNK_MAX_SIZE) {
-            int size = min((int)CHUNK_MAX_SIZE, (int)decoded_data->size() - (int)pos);
+        for(int i = 0; i < 5; ++i) {
+            for(size_t pos = 0; pos == 0 || pos < decoded_data->size(); pos += CHUNK_MAX_SIZE) {
+                int size = min((int)CHUNK_MAX_SIZE, (int)decoded_data->size() - (int)pos);
 
-            PacketHead head;
-            head.type = packet_type_modify;
-            head.time = x->timestamp-1;
-            memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
-            ModifyPacket modify;
-            modify.file_size = decoded_data->size()-x->extra_length;
-            modify.total_size = decoded_data->size();
-            modify.payload_offset = pos;
-            modify.payload_size = size;
+                PacketHead head;
+                head.type = packet_type_modify;
+                head.time = x->timestamp-1;
+                memcpy(head.filename, x->filename, FILENAME_MAX_SIZE);
+                ModifyPacket modify;
+                modify.file_size = decoded_data->size()-x->extra_length;
+                modify.total_size = decoded_data->size();
+                modify.payload_offset = pos;
+                modify.payload_size = size;
 
-            data_t data = CreateData();
-            data->resize(sizeof(head)+sizeof(modify)+size);
-            memcpy(data->data(), &head, sizeof(head));
-            memcpy(data->data()+sizeof(head), &modify, sizeof(modify));
-            memcpy(data->data()+sizeof(head)+sizeof(modify), decoded_data->data()+pos, size);
+                data_t data = CreateData();
+                data->resize(sizeof(head)+sizeof(modify)+size);
+                memcpy(data->data(), &head, sizeof(head));
+                memcpy(data->data()+sizeof(head), &modify, sizeof(modify));
+                memcpy(data->data()+sizeof(head)+sizeof(modify), decoded_data->data()+pos, size);
 
-            net->Broadcast(keys[key_index].key, data);
+                net->Broadcast(keys[key_index].key, data);
+            }
         }
     }
 }
