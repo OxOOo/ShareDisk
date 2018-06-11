@@ -40,6 +40,7 @@ public:
     void Init();
 
     string Resolve(const string& path) const;
+    string Pathname(const string& path) const;
     bool IsAccessible(const char *path) const; // path是否可访问
     bool IsTopLevel(const char *path) const; // path是否是根目录或者一级目录
     vector<string> KeyNames() const;

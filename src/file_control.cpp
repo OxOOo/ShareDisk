@@ -85,6 +85,16 @@ string FileControl::Resolve(const string& path) const
     return PathJoin(pd_path, path);
 }
 
+string FileControl::Pathname(const string& path) const
+{
+    int pos = -1;
+    for(int i = 0; i < path.length(); i ++) {
+        if (path[i] == '/') pos = i;
+    }
+    ASSERT(pos >= 0);
+    return path.substr(0, pos);
+}
+
 bool FileControl::IsAccessible(const char *path) const
 {
     if (strlen(path) == 1) return true; // "/"
@@ -521,6 +531,10 @@ void FileControl::StartThread()
                     memcpy(file.filename, head.filename, FILENAME_MAX_SIZE);
                     files.push_back(file);
                     x = &files[files.size()-1];
+
+                    char buf[FILENAME_MAX_SIZE*2];
+                    sprintf(buf, "mkdir -p %s", Pathname(Resolve(file.filename)).c_str());
+                    system(buf);
 
                     int fd = open(Resolve(file.filename).c_str(), O_WRONLY|O_CREAT, 0666);
                     fsync(fd);
